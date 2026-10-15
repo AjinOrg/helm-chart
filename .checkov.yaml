@@ -1,0 +1,17 @@
+# Checkov settings for the rendered chart (used locally and by .github/workflows/ci.yaml).
+# Every skipped check has a reason. Anything not listed here fails the pull request.
+compact: true
+quiet: true
+framework:
+  - kubernetes
+skip-check:
+  # ECR tags are IMMUTABLE: a tag always means the same image, which gives the guarantee a digest gives.
+  - CKV_K8S_43
+  # With immutable tags, IfNotPresent can never run a stale image; Always only adds registry calls.
+  - CKV_K8S_15
+  # No CPU limits on purpose: requests are set (scheduling, Karpenter); CPU limits only cause throttling.
+  # Memory limits ARE required (Kyverno require-requests-limits).
+  - CKV_K8S_11
+  # NetworkPolicies are applied per namespace by the platform team (aws-platform gitops/platform-config/namespaces),
+  # not by this chart, so Checkov cannot see them in the rendered chart.
+  - CKV2_K8S_6

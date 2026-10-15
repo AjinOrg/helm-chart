@@ -1,0 +1,8 @@
+# Output of scripts/render-all.sh
+rendered/
+
+# Local credentials / editor files
+.env
+*.pem
+.vscode/
+.idea/

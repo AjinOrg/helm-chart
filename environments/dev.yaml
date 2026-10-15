@@ -1,0 +1,4 @@
+# Which version of charts/microservice the dev environment runs (all services).
+# Read by the ApplicationSet "microservices" in AjinOrg/aws-platform (gitops/apps/microservices.yaml).
+environment: dev
+chartRevision: main # dev always runs the newest merged chart: chart changes are tested here first

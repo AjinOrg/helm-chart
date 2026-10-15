@@ -1,0 +1,9 @@
+apiVersion: v2
+name: microservice
+description: >
+  Shared chart for every microservice on the platform: Deployment, Service, Ingress, HPA, PDB, ServiceAccount,
+  ExternalSecret. One chart, many services: each service only adds values files under apps/<service>/.
+type: application
+# Bump on EVERY change under charts/ (CI enforces it). Merging the bump creates the git tag chart-v<version>,
+# which staging and production pin in environments/<env>.yaml.
+version: 0.1.0

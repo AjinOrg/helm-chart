@@ -1,0 +1,104 @@
+# helm-chart checks: every pull request to main (and every push to main) must pass all jobs.
+# Nothing here touches AWS or the cluster: no credentials are needed or available.
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HELM_VERSION: v4.3.0
+  CHECKOV_VERSION: 3.3.27
+  POLICY_REPO: AjinOrg/aws-platform # Kyverno policies are owned by the platform team; we only read them
+
+jobs:
+  gitleaks:
+    name: Secrets scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: bash .github/scripts/install-ci-tools.sh gitleaks
+      - run: gitleaks git --redact --verbose --log-opts="HEAD" .
+
+  chart-version:
+    name: Chart version bumped
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # history and the chart-v* tags
+      # A released chart version never changes: staging/production pin it and must get exactly what was tested
+      - run: |
+          CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" -- charts/)
+          [ -n "$CHANGED" ] || { echo "charts/ unchanged"; exit 0; }
+          V=$(sed -nE 's/^version: *"?([^" #]+)"?.*/\1/p' charts/microservice/Chart.yaml)
+          if git rev-parse -q --verify "refs/tags/chart-v$V" >/dev/null; then
+            echo "::error file=charts/microservice/Chart.yaml::charts/ changed but $V is already released as chart-v$V - bump 'version'"
+            exit 1
+          fi
+          echo "### Chart $V will be tagged chart-v$V when this merges (dev runs it right away)" >> "$GITHUB_STEP_SUMMARY"
+
+  manifests:
+    name: Render + kubeconform + Kyverno
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the chart-v* tags pinned by staging/production
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - run: bash .github/scripts/install-ci-tools.sh kubeconform kyverno
+      - name: platform policies (read-only copy)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.POLICY_REPO }}
+          path: platform
+          sparse-checkout: policies/kyverno
+      - name: helm lint
+        run: helm lint charts/microservice --set environment=dev --set image.repository=example --set image.tag=ci
+      - name: render every service in every environment
+        run: bash scripts/render-all.sh rendered
+      - name: kubeconform (Kubernetes + CRD schemas)
+        run: |
+          kubeconform -strict -summary \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            rendered/
+      - name: Kyverno policies (the same ones the cluster enforces)
+        run: |
+          for f in rendered/*.yaml; do
+            echo "== $f"
+            kyverno apply platform/policies/kyverno --resource "$f"
+          done
+
+  checkov:
+    name: Security scan (Checkov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet "checkov==${CHECKOV_VERSION}"
+      - run: bash scripts/render-all.sh rendered
+      - name: checkov (skipped checks and reasons are in .checkov.yaml)
+        run: checkov --config-file .checkov.yaml -d rendered

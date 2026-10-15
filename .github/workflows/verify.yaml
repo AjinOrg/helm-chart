@@ -1,0 +1,125 @@
+# Verify a deployment: after an image tag changes for a service in an environment, wait until that environment
+# serves it and run smoke tests. Verifies only - nothing is promoted automatically. Releases to staging and
+# production are started on purpose with release.yaml (or scripts/release.sh).
+#
+# Contract for every service: GET http://<alb>/<environment>/<service> answers JSON with
+#   "version" (= APP_VERSION, the image tag) and "environment" (= APP_ENV). Both env vars are set by the chart.
+# Extra checks per service: apps/<service>/smoke-test.sh (optional, gets URL in the environment).
+name: verify
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/*/values-*.yaml
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service to smoke-test (folder name under apps/)
+        type: string
+        required: true
+      environment:
+        description: Environment to smoke-test
+        type: choice
+        options: [dev, staging, production]
+
+permissions:
+  contents: read
+  id-token: write # GitHub OIDC → read-only AWS role (to find the load balancer address)
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  # Read-only role; trusts only main of this repository. Used to look up the ALB address, which changes every
+  # time Dev is rebuilt.
+  READ_ONLY_ROLE: arn:aws:iam::471112815218:role/helm-chart-readonly
+  INGRESS_GROUP: apps # ingress.groupName in charts/microservice/values.yaml
+
+jobs:
+  detect:
+    name: Which services and environments changed
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.d.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: d
+        env:
+          IN_SVC: ${{ inputs.service }}
+          IN_ENV: ${{ inputs.environment }}
+        run: |
+          tag_of() { sed -nE 's/^  tag: "?([^"]+)"?.*/\1/p' "apps/$1/values-$2.yaml"; }
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PAIRS="$IN_SVC $IN_ENV"
+          else
+            PAIRS=$(git diff --name-only HEAD~1 HEAD | sed -nE 's#^apps/([a-z0-9-]+)/values-(dev|staging|production)\.yaml$#\1 \2#p')
+          fi
+          JSON=$(echo "$PAIRS" | while read -r s e; do
+                   [ -n "$s" ] && printf '{"service":"%s","env":"%s","tag":"%s"}\n' "$s" "$e" "$(tag_of "$s" "$e")"
+                 done | jq -sc '{include: .}')
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+          echo "To verify: $JSON"
+
+  smoke-test:
+    name: Smoke test (${{ matrix.service }} in ${{ matrix.env }})
+    needs: detect
+    if: needs.detect.outputs.matrix != '{"include":[]}'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.detect.outputs.matrix) }}
+    env:
+      SVC: ${{ matrix.service }}
+      ENV_NAME: ${{ matrix.env }}
+      TAG: ${{ matrix.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.READ_ONLY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: find the shared load balancer
+        id: alb
+        run: |
+          ARN=$(aws resourcegroupstaggingapi get-resources \
+                  --tag-filters "Key=ingress.k8s.aws/stack,Values=$INGRESS_GROUP" \
+                  --resource-type-filters elasticloadbalancing:loadbalancer \
+                  --query 'ResourceTagMappingList[0].ResourceARN' --output text)
+          [ -n "$ARN" ] && [ "$ARN" != "None" ] || { echo "::error::No load balancer for IngressGroup $INGRESS_GROUP (is Dev running?)"; exit 1; }
+          DNS=$(aws elbv2 describe-load-balancers --load-balancer-arns "$ARN" --query 'LoadBalancers[0].DNSName' --output text)
+          echo "url=http://$DNS/$ENV_NAME/$SVC" >> "$GITHUB_OUTPUT"
+      - name: wait until ArgoCD has rolled out the tag (up to 10 minutes)
+        env:
+          URL: ${{ steps.alb.outputs.url }}
+        run: |
+          for i in $(seq 1 40); do
+            v=$(curl -fsS --max-time 5 "$URL" | jq -r .version 2>/dev/null || true)
+            [ "$v" = "$TAG" ] && { echo "$SVC in $ENV_NAME serves $TAG"; exit 0; }
+            echo "attempt $i: $SVC in $ENV_NAME serves '${v:-nothing}', waiting for $TAG"; sleep 15
+          done
+          echo "::error::$SVC in $ENV_NAME did not serve $TAG within 10 minutes"; exit 1
+      - name: smoke tests
+        env:
+          URL: ${{ steps.alb.outputs.url }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          BODY=$(curl -fsS --max-time 5 "$URL") || fail "GET $URL failed"
+          echo "$BODY" | jq .
+          [ "$(echo "$BODY" | jq -r .environment)" = "$ENV_NAME" ] || fail "wrong environment"
+          [ "$(echo "$BODY" | jq -r .version)" = "$TAG" ]          || fail "wrong version"
+          if [ -f "apps/$SVC/smoke-test.sh" ]; then
+            echo "== apps/$SVC/smoke-test.sh"
+            bash "apps/$SVC/smoke-test.sh"
+          fi
+          {
+            echo "### ✅ $SVC in $ENV_NAME serves \`$TAG\` and passed the smoke tests"
+            case "$ENV_NAME" in
+              dev)     echo "Release to staging when ready: Actions → release → Run workflow ($SVC, staging), or \`scripts/release.sh\`" ;;
+              staging) echo "Release to production when ready: Actions → release → Run workflow ($SVC, production), or \`scripts/release.sh\`" ;;
+            esac
+          } >> "$GITHUB_STEP_SUMMARY"

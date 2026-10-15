@@ -1,0 +1,31 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "microservice.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "microservice.labels" . | nindent 4 }}
+  annotations:
+    # All services and environments join one ALB (IngressGroup); load-balancer-level settings must match
+    # across the group. Paths never overlap (/<env>/<service>), so no group.order is needed.
+    alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.groupName }}
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]' # no domain = no certificate; HTTPS later
+    alb.ingress.kubernetes.io/target-type: ip # ALB sends straight to pod IPs (matches the network policy)
+    alb.ingress.kubernetes.io/healthcheck-path: {{ .Values.ingress.healthcheckPath | default .Values.probes.readinessPath }}
+    alb.ingress.kubernetes.io/load-balancer-attributes: routing.http.drop_invalid_header_fields.enabled=true
+    alb.ingress.kubernetes.io/tags: Project=aws-platform,ManagedBy=aws-load-balancer-controller
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: {{ include "microservice.ingressPath" . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "microservice.name" . }}
+                port:
+                  name: http
+{{- end }}

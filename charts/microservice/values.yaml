@@ -1,0 +1,65 @@
+# Defaults for EVERY service. Values are layered (later wins):
+#   1. this file                          chart defaults (release team)
+#   2. apps/<service>/values.yaml         settings of one service, all environments
+#   3. apps/<service>/values-<env>.yaml   settings of one service in one environment (image tag, replicas)
+# The service name is the Helm release name, which ArgoCD sets to the folder name under apps/.
+
+environment: "" # required: dev | staging | production (set in values-<env>.yaml)
+
+image:
+  repository: "" # required: the service's ECR repository (apps/<service>/values.yaml)
+  tag: ""        # required: image tag (7-char commit SHA), set by the service pipeline (dev) or release.yaml
+  pullPolicy: IfNotPresent
+
+containerPort: 8080
+
+# Extra environment variables, as a list of {name, value}. The chart always sets:
+#   APP_ENV (environment), APP_VERSION (image tag), PORT (containerPort), SECRETS_DIR (secrets mount path)
+extraEnv: []
+
+serviceAccount:
+  # IRSA role created by the platform team (Terraform). Empty = the pods get no AWS permissions at all.
+  roleArn: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi # memory limit required by the Kyverno policy; no CPU limit on purpose (throttling)
+
+# Every service must answer these two paths on containerPort (platform contract)
+probes:
+  livenessPath: /healthz
+  readinessPath: /readyz
+
+autoscaling:
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  maxUnavailable: 1 # works for 1 replica too (minAvailable: 1 would block node drains)
+
+# Application pods run on the Spot nodes Karpenter creates (NodePool "apps")
+nodeSelector:
+  node-role: apps
+
+# Secrets: External Secrets copies one Secrets Manager entry (JSON) into a Kubernetes Secret named like the
+# service; each JSON key becomes a file under the mount path. The entry is created (empty) by the platform
+# team in Terraform; its value is stored by an administrator, never in Git.
+secrets:
+  enabled: true
+  keyPrefix: platform-dev # entry name: <keyPrefix>/<service>/<environment>
+  secretsManagerKey: ""   # set only to override the name above
+  storeName: aws-secrets-manager
+  refreshInterval: 10m
+  mountPath: ""           # empty = /etc/<service>/secrets
+
+# One shared ALB for all services and environments (IngressGroup). Without a domain, services are told apart
+# by path: http://<alb-dns>/<environment>/<service>
+ingress:
+  enabled: true
+  groupName: apps
+  path: ""            # empty = /<environment>/<service>
+  healthcheckPath: "" # empty = probes.readinessPath

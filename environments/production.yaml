@@ -1,0 +1,4 @@
+# Which version of charts/microservice the production environment runs (all services).
+# Move to a newer chart-v* tag with a pull request after it ran in staging (Code Owner approval required).
+environment: production
+chartRevision: chart-v0.1.0

@@ -1,0 +1,41 @@
+# Chart release: when a chart change reaches main, tag it chart-v<version>.
+#   dev        runs main, so it gets the change immediately (the first real test)
+#   staging    moves to the new tag with a PR to environments/staging.yaml (no approval)
+#   production moves to the new tag with a PR to environments/production.yaml (Code Owner approval)
+# The tag ruleset (.github/rulesets/chart-tags.json) stops anyone from moving or deleting a released tag.
+name: chart-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - charts/**
+
+permissions:
+  contents: write # push the tag
+
+concurrency:
+  group: chart-release
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag chart-v<version>
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          V=$(sed -nE 's/^version: *"?([^" #]+)"?.*/\1/p' charts/microservice/Chart.yaml)
+          T="chart-v$V"
+          if git rev-parse -q --verify "refs/tags/$T" >/dev/null; then
+            if git diff --quiet "$T" HEAD -- charts/; then echo "$T already exists with this content"; exit 0; fi
+            echo "::error::charts/ differs from the released $T - the version was not bumped"; exit 1
+          fi
+          git tag "$T"
+          git push origin "$T"
+          {
+            echo "### Released \`$T\` (dev runs it now)"
+            echo "After it works in dev: set \`chartRevision: $T\` in environments/staging.yaml, later environments/production.yaml"
+          } >> "$GITHUB_STEP_SUMMARY"

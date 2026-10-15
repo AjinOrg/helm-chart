@@ -1,0 +1,14 @@
+# Who must approve a pull request, per file (ruleset on main: "require review from Code Owners", 0 other approvals).
+# Later patterns win. A pattern with NO owner means: no approval needed for that file.
+# Replace @AjinUrolime with the release team (e.g. @AjinOrg/release) when it exists.
+*                                  @AjinUrolime
+
+# dev: changed automatically by each service's pipeline after all its checks; no approval
+/apps/*/values-dev.yaml
+# staging: changed only by release.yaml, which a person starts on purpose with a tag that already ran in dev
+/apps/*/values-staging.yaml
+/environments/staging.yaml
+
+# production: started on purpose (release.yaml) AND approved by a Code Owner
+/apps/*/values-production.yaml     @AjinUrolime
+/environments/production.yaml      @AjinUrolime

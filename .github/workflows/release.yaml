@@ -1,0 +1,145 @@
+# Release a tested image of ONE service to staging or production - started ON PURPOSE by a person:
+#   GitHub → Actions → release → "Run workflow" (service + environment + tag), or scripts/release.sh (menus).
+#
+# Rules checked before anything changes:
+#   - the service exists (apps/<service>/)
+#   - the tag exists in the service's ECR repository
+#   - the tag has already run in the previous environment (staging ← dev, production ← staging)
+# Then a pull request changes apps/<service>/values-<environment>.yaml:
+#   - staging:    merges itself when ci passes (running this workflow IS the confirmation)
+#   - production: waits for a Code Owner approval (second confirmation)
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Service (folder name under apps/)
+        type: string
+        required: true
+      environment:
+        description: Release to
+        type: choice
+        options: [staging, production]
+        required: true
+      tag:
+        description: Image tag (7-char commit SHA). Empty = the tag running now in the previous environment
+        type: string
+        required: false
+
+run-name: release ${{ inputs.service }} ${{ inputs.tag || '(current)' }} → ${{ inputs.environment }} by @${{ github.actor }}
+
+permissions:
+  contents: read
+  id-token: write # read-only AWS role, to check the tag exists in ECR
+
+concurrency:
+  group: release-${{ inputs.service }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  READ_ONLY_ROLE: arn:aws:iam::471112815218:role/helm-chart-readonly # trusts only main of this repository
+
+jobs:
+  validate:
+    name: Validate the tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      from: ${{ steps.v.outputs.from }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history: has the tag run in the previous environment?
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.READ_ONLY_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: v
+        env:
+          SVC: ${{ inputs.service }}
+          TO: ${{ inputs.environment }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          fail() { echo "::error::$1"; echo "### ❌ $1" >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          echo "$SVC" | grep -Eq '^[a-z][a-z0-9-]{0,40}[a-z0-9]$' && [ -d "apps/$SVC" ] || fail "unknown service '$SVC' (no apps/$SVC)"
+          tag_of() { sed -nE 's/^  tag: "?([^"]+)"?.*/\1/p' "apps/$SVC/values-$1.yaml"; }
+          # every tag that has ever been set in an environment's values file (newest first)
+          history_of() { git log -p --format= -- "apps/$SVC/values-$1.yaml" | sed -nE 's/^\+  tag: "?([^"]+)"?.*/\1/p' | awk '!seen[$0]++'; }
+          ECR_REPO=$(sed -nE 's#^  repository: *"?[^"]*/([^/"]+)"?.*#\1#p' "apps/$SVC/values.yaml")
+          [ -n "$ECR_REPO" ] || fail "apps/$SVC/values.yaml has no image.repository"
+
+          case "$TO" in staging) FROM=dev ;; production) FROM=staging ;; *) fail "unknown environment $TO" ;; esac
+          TAG="${INPUT_TAG:-$(tag_of "$FROM")}"
+          TAG="$(echo "$TAG" | tr -d '[:space:]')"
+
+          echo "$TAG" | grep -Eq '^[0-9a-f]{7}$' || fail "'$TAG' is not a 7-character commit SHA"
+          history_of "$FROM" | grep -qx "$TAG"   || fail "$SVC $TAG has never run in $FROM - release it there first"
+          aws ecr describe-images --repository-name "$ECR_REPO" --image-ids imageTag="$TAG" >/dev/null 2>&1 \
+                                                 || fail "$TAG is not in ECR repository $ECR_REPO (rebuilt environment? re-run the service pipeline)"
+          [ "$(tag_of "$TO")" != "$TAG" ]        || fail "$SVC in $TO already runs $TAG"
+
+          {
+            echo "### Release $SVC \`$TAG\` → $TO (requested by @${{ github.actor }})"
+            echo "- running now in $FROM: \`$(tag_of "$FROM")\` · in $TO: \`$(tag_of "$TO")\`"
+            BT='`'
+            echo "- tags that have run in $FROM (newest first): $(history_of "$FROM" | head -10 | awk -v b="$BT" '{printf "%s%s%s ", b, $0, b}')"
+          } >> "$GITHUB_STEP_SUMMARY"
+          { echo "tag=$TAG"; echo "from=$FROM"; } >> "$GITHUB_OUTPUT"
+
+  release-pr:
+    name: Release pull request (${{ inputs.environment }})
+    needs: validate
+    runs-on: ubuntu-latest
+    env:
+      SVC: ${{ inputs.service }}
+      TO: ${{ inputs.environment }}
+      FROM: ${{ needs.validate.outputs.from }}
+      TAG: ${{ needs.validate.outputs.tag }}
+    steps:
+      - name: GitHub App configured?
+        if: vars.PLATFORM_APP_ID == ''
+        run: |
+          echo "::error::GitHub App not configured in this repository (variable PLATFORM_APP_ID, secret PLATFORM_APP_PRIVATE_KEY)"
+          exit 1
+      # App token: the PR it opens triggers ci (a PR opened with GITHUB_TOKEN would not run any workflow)
+      - id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.PLATFORM_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+      - name: open the release pull request
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          FILE="apps/$SVC/values-$TO.yaml"
+          BRANCH="deploy/$TO/$SVC-$TAG"
+          # Only the newest release request per service and environment stays open
+          for old in $(gh pr list --state open --json headRefName \
+                         --jq ".[].headRefName | select(test(\"^deploy/$TO/$SVC-[0-9a-f]{7}\$\"))"); do
+            [ "$old" = "$BRANCH" ] && continue
+            gh pr close "$old" --delete-branch --comment "Superseded by release of $SVC $TAG"
+          done
+          sed -i -E "s/^(  tag: ).*/\1\"$TAG\"/" "$FILE"
+          # Commit as the GitHub App's own bot account, so every commit is attributed to the app
+          SLUG="${{ steps.app-token.outputs.app-slug }}"
+          BOT_ID=$(gh api "users/${SLUG}%5Bbot%5D" --jq .id)
+          git config user.name "${SLUG}[bot]"
+          git config user.email "${BOT_ID}+${SLUG}[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git commit -am "deploy($TO): $SVC $TAG"
+          git push --force origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "deploy($TO): $SVC $TAG" \
+            --body "Release of \`$SVC:$TAG\` to **$TO**, requested by @${{ github.actor }}.
+          Already ran in $FROM. Request: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ "$TO" = staging ]; then
+            gh pr merge "$BRANCH" --auto --squash --delete-branch
+            echo "### Staging release PR opened for $SVC \`$TAG\`: merges when ci passes, then verify.yaml smoke-tests it" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Production release PR opened for $SVC \`$TAG\`: waiting for Code Owner approval" >> "$GITHUB_STEP_SUMMARY"
+          fi

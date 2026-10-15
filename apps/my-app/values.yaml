@@ -1,0 +1,6 @@
+# my-app: settings for all environments. Per environment: values-<env>.yaml. Defaults: charts/microservice/values.yaml
+image:
+  repository: 471112815218.dkr.ecr.ap-south-1.amazonaws.com/my-app
+serviceAccount:
+  # IRSA role (platform Terraform, module iam). Starts with no AWS permissions; add only what the app needs
+  roleArn: arn:aws:iam::471112815218:role/platform-dev-my-app

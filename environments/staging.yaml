@@ -1,0 +1,4 @@
+# Which version of charts/microservice the staging environment runs (all services).
+# Move to a newer chart-v* tag with a pull request after it ran in dev.
+environment: staging
+chartRevision: chart-v0.1.0
