@@ -1,7 +1,7 @@
 # my-app in dev. image.tag is updated by the my-app pipeline (pull request that merges itself after CI).
 environment: dev
 image:
-  tag: "39fe5f0"
+  tag: "6809844"
 # Sized so the load test (aws-platform demo/load-test.yaml) shows the whole chain: 10 replicas x 200m = 2 vCPU
 # does not fit on the existing nodes, so Karpenter must add one. Staging/production keep the chart defaults.
 resources:
