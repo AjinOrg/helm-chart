@@ -1,4 +1,5 @@
 # Which version of charts/microservice the production environment runs (all services).
-# Move to a newer chart-v* tag with a pull request after it ran in staging (Code Owner approval required).
+# A released version = the package ghcr.io/ajinorg/charts/microservice:<version> (see chart-release.yaml).
+# Move to a newer version with a pull request after it ran in staging (Code Owner approval required).
 environment: production
-chartRevision: chart-v0.1.0
+chartRevision: 0.1.0

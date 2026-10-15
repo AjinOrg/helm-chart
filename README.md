@@ -33,9 +33,9 @@ helm-chart/
 │       ├── values-production.yaml
 │       └── smoke-test.sh         optional extra checks after a deploy
 ├── environments/
-│   ├── dev.yaml                  chartRevision: main            (dev always runs the newest chart)
-│   ├── staging.yaml              chartRevision: chart-v0.1.0    (pinned)
-│   └── production.yaml           chartRevision: chart-v0.1.0    (pinned)
+│   ├── dev.yaml                  chartRevision: main     (dev always runs the newest chart, from git)
+│   ├── staging.yaml              chartRevision: 0.1.0    (pinned: package from ghcr.io)
+│   └── production.yaml           chartRevision: 0.1.0    (pinned: package from ghcr.io)
 ├── scripts/
 │   ├── render-all.sh             render everything exactly as ArgoCD does (CI and locally)
 │   └── release.sh                interactive release (menus) → starts release.yaml
@@ -57,8 +57,9 @@ aws-platform (infra team)
     ApplicationSet "microservices"
       for every folder apps/<service>/  ×  every file environments/<env>.yaml
         → ArgoCD Application "<service>-<env>"
-            chart:  charts/microservice at chartRevision (environments/<env>.yaml)
-            values: apps/<service>/values.yaml + values-<env>.yaml (main)
+            chart:  chartRevision "main"  → charts/microservice from git main            (dev)
+                    chartRevision "0.1.0" → oci://ghcr.io/ajinorg/charts/microservice    (staging, production)
+            values: apps/<service>/values.yaml + values-<env>.yaml (git main)
             into namespace <env>, Helm release name <service>
 ```
 - **New service** = new folder under `apps/`. ArgoCD creates its three Applications by itself; no platform PR.
@@ -78,11 +79,16 @@ A chart change affects every service, so environments do not all take it at once
 | Step | What | Who / approval |
 |---|---|---|
 | 1 | PR changes `charts/` **and bumps `version`** in `Chart.yaml` (CI fails otherwise) | Code Owner |
-| 2 | Merge → `chart-release.yaml` tags `chart-v<version>`; **dev runs it immediately** (dev follows `main`) | automatic |
-| 3 | PR: `environments/staging.yaml` → `chartRevision: chart-v<version>` | no approval |
-| 4 | PR: `environments/production.yaml` → `chartRevision: chart-v<version>` | Code Owner |
+| 2 | Merge → `chart-release.yaml` tags `chart-v<version>` and publishes `oci://ghcr.io/ajinorg/charts/microservice:<version>`; **dev runs it immediately** (dev follows `main`) | automatic |
+| 3 | PR: `environments/staging.yaml` → `chartRevision: <version>` | no approval |
+| 4 | PR: `environments/production.yaml` → `chartRevision: <version>` | Code Owner |
 
-- Released tags cannot be moved or deleted (ruleset `chart-tags`): production always gets exactly what was tested.
+- **Why a package for staging/production, not the git tag:** ArgoCD refuses to take the chart from one revision of
+  a repository and the values (`$values`) from another revision of the *same* repository ("cannot reference a
+  different revision of the same repository"). The package on ghcr.io is a separate source; dev takes chart and
+  values from the same revision (`main`), which is allowed.
+- Released tags cannot be moved or deleted (ruleset `chart-tags`) and a published version is never pushed again:
+  production always gets exactly what was tested.
 - CI renders staging/production with their pinned chart **and** with the newest chart (`*.next.yaml`), so a chart
   change is checked against every service before anyone pins it.
 - Values always come from `main`. A new chart value must therefore have a default in the chart, and values files
@@ -173,6 +179,18 @@ gh variable set PLATFORM_APP_ID -R AjinOrg/helm-chart --body "$APP_ID"
 gh secret set PLATFORM_APP_PRIVATE_KEY -R AjinOrg/helm-chart < "$KEY"
 gh secret set PLATFORM_APP_PRIVATE_KEY -R AjinOrg/my-app < "$KEY"   # optional: same key everywhere
 shred -u "$KEY" 2>/dev/null || rm -f "$KEY"
+```
+
+**7c-2. Chart packages on ghcr.io** (added after the first staging sync failed, 2026-10-16)
+```bash
+gh workflow run chart-release.yaml -R AjinOrg/helm-chart        # publishes the current version (0.1.0)
+gh run watch -R AjinOrg/helm-chart $(gh run list -R AjinOrg/helm-chart --workflow chart-release.yaml --limit 1 --json databaseId --jq '.[0].databaseId')
+```
+Then make the package public **once** (ArgoCD pulls it without credentials, like the other public charts):
+https://github.com/orgs/AjinOrg/packages → `charts/microservice` → *Package settings* → *Change visibility* →
+**Public**. Check without logging in:
+```bash
+helm registry logout ghcr.io 2>/dev/null; helm show chart oci://ghcr.io/ajinorg/charts/microservice --version 0.1.0
 ```
 
 **7d. AWS role for release/verify** (`helm-chart-readonly`, in aws-platform `bootstrap/state-backend.yaml`)
