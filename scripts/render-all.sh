@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Renders every service in every environment exactly as ArgoCD deploys it:
-#   chart  = charts/microservice at the environment's chartRevision (environments/<env>.yaml)
+#   chart  = charts/microservice at the environment's chartRevision (environments/<env>.yaml):
+#            "main" = this checkout; a version (e.g. 0.1.0) = git tag chart-v<version>, which holds exactly the
+#            content published as ghcr.io/ajinorg/charts/microservice:<version>, the package ArgoCD deploys
 #   values = apps/<service>/values.yaml + apps/<service>/values-<env>.yaml (from this checkout)
 # Environments pinned to a chart tag are ALSO rendered with this checkout's chart (<service>-<env>.next.yaml),
 # so a chart change is checked against every service and environment before anyone pins it.
@@ -17,16 +19,18 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { echo "::error::$1" >&2; exit 1; }
 
-# chart_dir <revision>: path of charts/microservice at that revision ("main" = this checkout)
+# chart_dir <revision>: path of charts/microservice for "main" (this checkout) or a released version
 chart_dir() {
-  local rev="$1"
+  local rev="$1" tag
   if [ "$rev" = main ]; then echo charts/microservice; return; fi
-  git rev-parse -q --verify "refs/tags/$rev^{commit}" >/dev/null || fail "chart revision '$rev' is not an existing git tag"
-  if [ ! -d "$TMP/$rev" ]; then
-    mkdir -p "$TMP/$rev"
-    git archive "$rev" charts/microservice | tar -x -C "$TMP/$rev"
+  echo "$rev" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "chartRevision '$rev' must be 'main' or a released version like 0.1.0"
+  tag="chart-v$rev"
+  git rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null || fail "chart $rev is not released (no git tag $tag)"
+  if [ ! -d "$TMP/$tag" ]; then
+    mkdir -p "$TMP/$tag"
+    git archive "$tag" charts/microservice | tar -x -C "$TMP/$tag"
   fi
-  echo "$TMP/$rev/charts/microservice"
+  echo "$TMP/$tag/charts/microservice"
 }
 
 render() { # render <service> <env> <chart-dir> <out-file>

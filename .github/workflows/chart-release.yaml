@@ -1,8 +1,14 @@
-# Chart release: when a chart change reaches main, tag it chart-v<version>.
-#   dev        runs main, so it gets the change immediately (the first real test)
-#   staging    moves to the new tag with a PR to environments/staging.yaml (no approval)
-#   production moves to the new tag with a PR to environments/production.yaml (Code Owner approval)
-# The tag ruleset (.github/rulesets/chart-tags.json) stops anyone from moving or deleting a released tag.
+# Chart release: when a chart change reaches main, release it as version <version> (Chart.yaml):
+#   - git tag chart-v<version>                        (history; CI renders pinned environments from it)
+#   - OCI package ghcr.io/ajinorg/charts/microservice:<version>   (what ArgoCD deploys to staging/production)
+# Why a package and not the git tag: ArgoCD cannot take the chart from one revision of this repository and the
+# values ($values) from another revision (main) of the same repository. A chart from ghcr.io is a different source.
+#
+#   dev        runs main from git, so it gets the change immediately (the first real test)
+#   staging    moves to the new version with a PR to environments/staging.yaml (no approval)
+#   production moves to the new version with a PR to environments/production.yaml (Code Owner approval)
+# The tag ruleset (.github/rulesets/chart-tags.json) stops anyone from moving or deleting a released tag; a
+# published package version is never overwritten (checked below).
 name: chart-release
 
 on:
@@ -10,32 +16,55 @@ on:
     branches: [main]
     paths:
       - charts/**
+  workflow_dispatch: # publish the current version by hand (e.g. the first one)
 
 permissions:
   contents: write # push the tag
+  packages: write # push the chart to ghcr.io
 
 concurrency:
   group: chart-release
   cancel-in-progress: false
 
+env:
+  HELM_VERSION: v4.3.0
+  REGISTRY: ghcr.io/ajinorg/charts # lowercase: OCI names cannot contain capitals
+
 jobs:
-  tag:
-    name: Tag chart-v<version>
+  release:
+    name: Release chart <version>
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - run: |
+      - uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: git tag chart-v<version>
+        id: v
+        run: |
           V=$(sed -nE 's/^version: *"?([^" #]+)"?.*/\1/p' charts/microservice/Chart.yaml)
           T="chart-v$V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
           if git rev-parse -q --verify "refs/tags/$T" >/dev/null; then
             if git diff --quiet "$T" HEAD -- charts/; then echo "$T already exists with this content"; exit 0; fi
             echo "::error::charts/ differs from the released $T - the version was not bumped"; exit 1
           fi
           git tag "$T"
           git push origin "$T"
+      - name: publish to ghcr.io (never overwrite a version)
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          if helm show chart "oci://$REGISTRY/microservice" --version "$V" >/dev/null 2>&1; then
+            echo "microservice $V is already published"
+          else
+            helm package charts/microservice
+            helm push "microservice-$V.tgz" "oci://$REGISTRY"
+          fi
           {
-            echo "### Released \`$T\` (dev runs it now)"
-            echo "After it works in dev: set \`chartRevision: $T\` in environments/staging.yaml, later environments/production.yaml"
+            echo "### Released chart \`$V\` (git tag \`chart-v$V\`, \`oci://$REGISTRY/microservice:$V\`)"
+            echo "dev runs it now. After it works in dev: set \`chartRevision: $V\` in environments/staging.yaml, later environments/production.yaml"
           } >> "$GITHUB_STEP_SUMMARY"
