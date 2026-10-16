@@ -1,7 +1,7 @@
 # my-app in production. image.tag changes only through release.yaml AND a Code Owner approval.
 environment: production
 image:
-  tag: "edd9422"
+  tag: "dbc993a"
 autoscaling:
   minReplicas: 3
   maxReplicas: 20
