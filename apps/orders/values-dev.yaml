@@ -1,0 +1,4 @@
+# orders in dev. image.tag is updated by the orders pipeline (pull request that merges itself after CI).
+environment: dev
+image:
+  tag: "3b84d8f"

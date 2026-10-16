@@ -1,0 +1,7 @@
+# orders in production. image.tag changes only through release.yaml AND a Code Owner approval.
+environment: production
+image:
+  tag: "3b84d8f"
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 6
