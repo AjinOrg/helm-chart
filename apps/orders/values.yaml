@@ -1,9 +1,9 @@
 # orders: settings for all environments. Per environment: values-<env>.yaml. Defaults: charts/microservice/values.yaml
 image:
   repository: 471112815218.dkr.ecr.ap-south-1.amazonaws.com/orders
-# orders needs no secrets and no AWS access: no ExternalSecret, and no IRSA role (serviceAccount.roleArn stays empty)
-secrets:
-  enabled: false
+# Secrets: on (chart default). ExternalSecret reads platform-dev/orders/<env> (JSON with DATABASE_URL) and mounts
+# each key as a file under /etc/orders/secrets. The value is stored by an administrator, never in Git.
+# No AWS access: no IRSA role (serviceAccount.roleArn stays empty); External Secrets reads the secret, not orders.
 extraEnv:
   # my-app in the SAME namespace (short Service name): orders in dev calls my-app in dev, staging calls staging, ...
   # Allowed only by the NetworkPolicies allow-orders-to-my-app and allow-my-app-from-orders (aws-platform namespaces)
