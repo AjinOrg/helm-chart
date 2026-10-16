@@ -1,0 +1,7 @@
+# orders in staging. image.tag changes only through release.yaml, with a tag that already ran in dev.
+environment: staging
+image:
+  tag: "3b84d8f"
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 4

@@ -26,12 +26,13 @@ helm-chart/
 ├── charts/microservice/          the ONE chart all services use (Deployment, Service, Ingress, HPA, PDB,
 │                                 ServiceAccount, ExternalSecret)
 ├── apps/
-│   └── my-app/                   one folder per service; the folder name IS the service name
-│       ├── values.yaml           all environments: image repository, IRSA role, ...
-│       ├── values-dev.yaml       per environment: image tag, replicas, resources
-│       ├── values-staging.yaml
-│       ├── values-production.yaml
-│       └── smoke-test.sh         optional extra checks after a deploy
+│   ├── my-app/                   one folder per service; the folder name IS the service name
+│   │   ├── values.yaml           all environments: image repository, IRSA role, ...
+│   │   ├── values-dev.yaml       per environment: image tag, replicas, resources
+│   │   ├── values-staging.yaml
+│   │   ├── values-production.yaml
+│   │   └── smoke-test.sh         optional extra checks after a deploy
+│   └── orders/                   second service (Python): no secrets, no IRSA role, calls my-app (extraEnv)
 ├── environments/
 │   ├── dev.yaml                  chartRevision: main     (dev always runs the newest chart, from git)
 │   ├── staging.yaml              chartRevision: 0.1.0    (pinned: package from ghcr.io)
@@ -96,8 +97,10 @@ A chart change affects every service, so environments do not all take it at once
 
 ## 4. Add a New Service
 **Infra team first** (aws-platform, Terraform): ECR repository `<service>`, Secrets Manager entries
-`platform-dev/<service>/<env>`, optional IRSA role, and in `bootstrap/state-backend.yaml` the service repo's
-ECR push role. Then here:
+`platform-dev/<service>/<env>` (only if it has secrets), optional IRSA role, in `bootstrap/state-backend.yaml` the
+service repo's ECR push role, and in `gitops/platform-config/namespaces/*.yaml` the service in
+`allow-from-load-balancer` (default-deny: without it the ALB answers 502) plus a policy pair for every other
+service it calls. Then here, once its first image is in ECR (worked example: `orders`, aws-platform README Step 17):
 ```bash
 mkdir apps/orders
 cat > apps/orders/values.yaml <<'EOF'
